@@ -159,7 +159,12 @@ def upload_document():
 
 @app.route('/')
 def index():
-    return send_from_directory('.', 'index.html')
+    # return send_from_directory('.', 'index.html')
+    return render_template('index.html')
+
+@app.route('/static/<path:path>')
+def serve_static(path):
+    return send_from_directory('static', path)
 
 @app.route('/query', methods=['POST'])
 def process_query():
