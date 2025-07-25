@@ -105,6 +105,58 @@ model = genai.GenerativeModel('gemini-1.5-flash')
 app = Flask(__name__)
 CORS(app)
 
+# Configure upload settings
+UPLOAD_FOLDER = './Doc'
+ALLOWED_EXTENSIONS = {'docx'}
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+@app.route('/upload', methods=['POST'])
+def upload_document():
+    try:
+        if 'document' not in request.files:
+            return jsonify({'success': False, 'message': 'No file provided'})
+        
+        file = request.files['document']
+        
+        if file.filename == '':
+            return jsonify({'success': False, 'message': 'No file selected'})
+        
+        if file and allowed_file(file.filename):
+            filename = secure_filename(file.filename)
+            
+            # Ensure upload directory exists
+            os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+            
+            # Save the uploaded file
+            file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            file.save(file_path)
+            
+            # Run the vector database creation logic
+            try:
+                # Import and run your existing vector database creation code
+                from creat_vec_database import main as create_vector_db
+                create_vector_db()
+                
+                return jsonify({
+                    'success': True, 
+                    'message': f'Document "{filename}" uploaded and processed successfully! Your personal financial knowledge base has been updated.'
+                })
+                
+            except Exception as e:
+                return jsonify({
+                    'success': False, 
+                    'message': f'Document uploaded but failed to process: {str(e)}'
+                })
+        
+        return jsonify({'success': False, 'message': 'Invalid file type. Please upload a .docx file'})
+        
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'Upload failed: {str(e)}'})
+
 @app.route('/')
 def index():
     return send_from_directory('.', 'index.html')
