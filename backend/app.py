@@ -6,13 +6,22 @@ import os
 import google.generativeai as genai
 import warnings
 import json
-import requests 
-from flask import Flask, render_template, request, jsonify, send_from_directory
+import requests
+from flask import Flask, request, jsonify, send_file
 from langchain_community.vectorstores import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain.prompts import ChatPromptTemplate
 
-#to load the environment variables
+# Get absolute path to the directory where this app.py script lives
+basedir = os.path.abspath(os.path.dirname(__file__))
+# Path to frontend's 'dist' folder
+dist_dir = os.path.join(basedir, "../Project2/project/dist")
+
+# Initialize Flask app
+app = Flask(__name__, static_folder=dist_dir, static_url_path='')
+CORS(app)
+
+# Load environment variables
 load_dotenv()
 
 # Suppress LangChain and Chroma warnings
@@ -30,7 +39,11 @@ CHROMA_PATH = "chroma"
 em_func = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
 # Load Chroma database
-db = Chroma(persist_directory=CHROMA_PATH, embedding_function=em_func)
+try:
+    db = Chroma(persist_directory=CHROMA_PATH, embedding_function=em_func)
+except Exception as e:
+    print(f"ChromaDB not found at startup: {e}")
+    db = None
 
 def perform_web_search(query, api_key, num_results=3):
     try:
@@ -91,7 +104,7 @@ You are an Advisor LLM for a Personal Finance Advisor. Your task is to take a JS
 - If the context is empty or irrelevant, use general financial knowledge.
 - Output only the conversational response, no JSON, formatted with markdown for emphasis (e.g., **Suggestion**).
 
-**Example****:
+**Example**:
 - Input: {{"RAG_needed": "yes", "websearch_needed": "yes", "prompt": "What is my money flow pattern in March?", "context": "April data: Income $5,200, Expenses $3,800...\n\n---\n\n**Web Search Results**:\n- [Finance Site](https://example.com)"}}
 - Output: I don't have March 2025 data, but based on your April 2025 patterns, your income was $5,200 with expenses of $3,800 (housing, utilities, dining out). You saved $1,000 and invested $400. Check the web search results for more insights. **Suggestion**: Track March expenses in a budgeting app like YNAB to identify patterns.
 - Input: {{"RAG_needed": "no", "websearch_needed": "no", "prompt": "Hi", "context": ""}}
@@ -100,10 +113,6 @@ You are an Advisor LLM for a Personal Finance Advisor. Your task is to take a JS
 
 # Initialize Gemini model
 model = genai.GenerativeModel('gemini-1.5-flash')
-
-# Flask app
-app = Flask(__name__)
-CORS(app)
 
 # Configure upload settings
 UPLOAD_FOLDER = './Doc'
@@ -114,75 +123,69 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
+# Custom static file route to set correct MIME types
+@app.route('/assets/<path:filename>')
+def serve_static(filename):
+    file_path = os.path.join(dist_dir, 'assets', filename)
+    if not os.path.exists(file_path):
+        return jsonify({'error': 'File not found'}), 404
+    # Set MIME type based on file extension
+    if filename.endswith('.js'):
+        return send_file(file_path, mimetype='application/javascript')
+    elif filename.endswith('.css'):
+        return send_file(file_path, mimetype='text/css')
+    elif filename.endswith('.html'):
+        return send_file(file_path, mimetype='text/html')
+    else:
+        return send_file(file_path)
+
+# API Route for uploading documents
 @app.route('/upload', methods=['POST'])
 def upload_document():
     try:
         if 'document' not in request.files:
             return jsonify({'success': False, 'message': 'No file provided'})
-        
         file = request.files['document']
-        
         if file.filename == '':
             return jsonify({'success': False, 'message': 'No file selected'})
-        
         if file and allowed_file(file.filename):
             filename = secure_filename(file.filename)
-            
-            # Ensure upload directory exists
             os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-            
-            # Save the uploaded file
             file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
             file.save(file_path)
-            
-            # Run the vector database creation logic
             try:
-                # Import and run your existing vector database creation code
                 from creat_vec_database import main as create_vector_db
                 create_vector_db()
-                
+                global db
+                db = Chroma(persist_directory=CHROMA_PATH, embedding_function=em_func)
                 return jsonify({
-                    'success': True, 
-                    'message': f'Document "{filename}" uploaded and processed successfully! Your personal financial knowledge base has been updated.'
+                    'success': True,
+                    'message': f'Document "{filename}" uploaded and processed successfully!'
                 })
-                
             except Exception as e:
                 return jsonify({
-                    'success': False, 
+                    'success': False,
                     'message': f'Document uploaded but failed to process: {str(e)}'
                 })
-        
         return jsonify({'success': False, 'message': 'Invalid file type. Please upload a .docx file'})
-        
     except Exception as e:
         return jsonify({'success': False, 'message': f'Upload failed: {str(e)}'})
 
-@app.route('/')
-def index():
-    # return send_from_directory('.', 'index.html')
-    return render_template('index.html')
-
-@app.route('/static/<path:path>')
-def serve_static(path):
-    return send_from_directory('static', path)
-
+# API Route for processing queries
 @app.route('/query', methods=['POST'])
 def process_query():
+    global db
+    if db is None:
+        return jsonify({'advisor_response': 'The knowledge base is not yet initialized. Please upload a document first.'})
     data = request.get_json()
     query_text = data.get('query', '')
     search_links_md = ""
-
     if query_text.lower() in ['exit', 'quit', 'bye']:
         return jsonify({'response': 'Goodbye!'})
-
-    # Format prompt for Manager LLM (no context yet)
     manager_prompt_template = ChatPromptTemplate.from_template(MANAGER_PROMPT_TEMPLATE)
     manager_prompt = manager_prompt_template.format_messages(query=query_text)
-
-    # Generate JSON response from Manager LLM
     try:
         manager_response = model.generate_content(manager_prompt[0].content)
-        # Clean markdown from response
         cleaned_text = manager_response.text.strip()
         if cleaned_text.startswith("```json"):
             cleaned_text = cleaned_text[7:].strip()
@@ -190,17 +193,11 @@ def process_query():
             cleaned_text = cleaned_text[3:].strip()
         if cleaned_text.endswith("```"):
             cleaned_text = cleaned_text[:-3].strip()
-
-        # Parse Manager LLM JSON
         try:
             manager_json = json.loads(cleaned_text)
-
-            # Perform RAG if needed
             if manager_json.get("RAG_needed") == "yes":
                 result = db.similarity_search(query_text, k=3)
                 manager_json["context"] = "\n\n---\n\n".join([doc.page_content for doc in result])
-
-            # Perform web search if needed
             if manager_json.get("websearch_needed") == "yes":
                 serpapi_key = os.environ.get("SERPAPI_API_KEY")
                 if not serpapi_key:
@@ -208,12 +205,8 @@ def process_query():
                 else:
                     search_links_md = perform_web_search(manager_json["prompt"], serpapi_key)
                     manager_json["context"] += "\n\n---\n\n**Web Search Results**:\n" + search_links_md
-
-            # Format prompt for Advisor LLM
             advisor_prompt_template = ChatPromptTemplate.from_template(ADVISOR_PROMPT_TEMPLATE)
             advisor_prompt = advisor_prompt_template.format_messages(manager_json=json.dumps(manager_json))
-
-            # Generate response from Advisor LLM
             try:
                 advisor_response = model.generate_content(advisor_prompt[0].content)
                 return jsonify({
@@ -227,20 +220,24 @@ def process_query():
                     'advisor_response': {'error': f"Error generating response with Advisor LLM: {str(e)}"},
                     'web_links': search_links_md
                 })
-
         except json.JSONDecodeError:
             return jsonify({
                 'manager_response': {'error': 'Invalid JSON from Manager LLM', 'raw': cleaned_text},
                 'advisor_response': None,
                 'web_links': ""
             })
-
     except Exception as e:
         return jsonify({
             'manager_response': {'error': f"Error generating response with Manager LLM: {str(e)}"},
             'advisor_response': None,
             'web_links': ""
         })
+
+# Serve index.html for all non-API routes
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def catch_all(path):
+    return send_file(os.path.join(dist_dir, 'index.html'), mimetype='text/html')
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
